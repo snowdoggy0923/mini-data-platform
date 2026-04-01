@@ -17,6 +17,13 @@ from agent.tools import (
 )
 
 MODEL = "claude-sonnet-4-6"
+SUMMARIZE_MODEL = "claude-haiku-4-5-20251001"
+
+# Context compression thresholds
+# Estimate: 1 token ≈ 4 chars. Compress when exceeding ~50K tokens.
+COMPRESS_CHAR_THRESHOLD = 200_000
+# Keep the most recent N messages intact (preserve current conversation context)
+KEEP_RECENT_MESSAGES = 8  # ~4 turns (user + assistant pairs)
 
 
 @dataclass
@@ -60,6 +67,7 @@ class DataAgent:
             on_tool_end(name, result):   called when a tool returns
         """
         self.messages.append({"role": "user", "content": user_message})
+        self._maybe_compress()
 
         full_text = ""
 
@@ -172,3 +180,88 @@ class DataAgent:
             return get_metadata_context(self.project_dir, tool_input["topic"])
         else:
             return f"Unknown tool: {name}"
+
+    # ------------------------------------------------------------------
+    # Context compression
+    # ------------------------------------------------------------------
+
+    def _estimate_chars(self) -> int:
+        """Rough character count of all messages (proxy for token count)."""
+        return sum(len(json.dumps(m, default=str)) for m in self.messages)
+
+    def _maybe_compress(self) -> None:
+        """Compress old messages into a summary when context grows too large.
+
+        Strategy (sliding window + summary):
+        1. Keep the most recent KEEP_RECENT_MESSAGES messages intact
+        2. Summarize everything older using a cheap, fast model (Haiku)
+        3. Replace old messages with the summary
+
+        This mirrors the approach used by Claude Code itself.
+        The biggest token consumers are tool_result blocks (SQL output),
+        so compression is very effective.
+        """
+        if self._estimate_chars() < COMPRESS_CHAR_THRESHOLD:
+            return
+
+        if len(self.messages) <= KEEP_RECENT_MESSAGES:
+            return
+
+        old_messages = self.messages[:-KEEP_RECENT_MESSAGES]
+        recent_messages = self.messages[-KEEP_RECENT_MESSAGES:]
+
+        summary = self._summarize(old_messages)
+
+        # Replace old messages with a compact summary
+        # Must maintain valid message structure: user → assistant alternation
+        self.messages = [
+            {"role": "user", "content": f"[Previous conversation summary]:\n{summary}"},
+            {"role": "assistant", "content": "Understood. I have the context from our previous conversation and will use it to inform my answers."},
+            *recent_messages,
+        ]
+
+    def _summarize(self, messages: list[dict]) -> str:
+        """Use a cheap model to summarize old conversation messages."""
+        # Extract readable text from messages (flatten tool_use/tool_result blocks)
+        conversation_text = self._flatten_messages(messages)
+
+        response = self._client.messages.create(
+            model=SUMMARIZE_MODEL,
+            max_tokens=1024,
+            system=(
+                "You are a conversation summarizer. Produce a concise summary of the "
+                "data analysis conversation below. Focus on:\n"
+                "- What questions the user asked\n"
+                "- What SQL queries were run and their key results (specific numbers)\n"
+                "- Any important findings or conclusions\n"
+                "Keep it factual and compact. Do NOT include raw SQL output rows."
+            ),
+            messages=[{"role": "user", "content": conversation_text}],
+        )
+        return response.content[0].text
+
+    @staticmethod
+    def _flatten_messages(messages: list[dict]) -> str:
+        """Convert messages (including tool blocks) into readable plain text."""
+        parts: list[str] = []
+        for msg in messages:
+            role = msg["role"].upper()
+            content = msg["content"]
+
+            if isinstance(content, str):
+                parts.append(f"{role}: {content}")
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            parts.append(f"{role}: {block['text']}")
+                        elif block.get("type") == "tool_use":
+                            parts.append(f"{role} [tool call]: {block['name']}({json.dumps(block.get('input', {}), default=str)[:200]})")
+                        elif block.get("type") == "tool_result":
+                            # Truncate large tool results — these are the main token consumers
+                            result_text = str(block.get("content", ""))
+                            if len(result_text) > 500:
+                                result_text = result_text[:500] + "... [truncated]"
+                            parts.append(f"{role} [tool result]: {result_text}")
+
+        return "\n".join(parts)
