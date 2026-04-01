@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 import anthropic
 
 from agent.context import build_system_prompt
+from agent.playbooks import PlaybookStore
+from agent.search import TableIndex
 from agent.tools import (
     TOOL_DEFINITIONS,
     describe_table,
@@ -43,10 +47,16 @@ class DataAgent:
     messages: list[dict] = field(default_factory=list)
     system_prompt: str = ""
     _client: anthropic.Anthropic | None = field(default=None, repr=False)
+    _table_index: TableIndex | None = field(default=None, repr=False)
+    _playbook_store: PlaybookStore | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self._client = anthropic.Anthropic()
         self.system_prompt = build_system_prompt(self.db_path, self.project_dir)
+        self._table_index = _build_table_index(self.db_path)
+        self._playbook_store = PlaybookStore(
+            str(Path(self.project_dir) / "playbooks")
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -66,7 +76,27 @@ class DataAgent:
             on_tool_start(name, input):  called when a tool invocation begins
             on_tool_end(name, result):   called when a tool returns
         """
-        self.messages.append({"role": "user", "content": user_message})
+        # --- Semantic search: find relevant tables ---
+        enriched_message = user_message
+        try:
+            if self._table_index:
+                relevant = self._table_index.search(user_message, top_k=3)
+                if relevant:
+                    tables_hint = ", ".join(f"{t} ({s:.0%})" for t, s in relevant)
+                    enriched_message += f"\n\n[Semantic search suggests these tables are most relevant: {tables_hint}]"
+        except Exception:
+            pass  # graceful fallback — agent works fine without semantic hints
+
+        # --- Playbooks: inject similar past query patterns ---
+        try:
+            if self._playbook_store:
+                similar = self._playbook_store.find_similar(user_message)
+                if similar:
+                    enriched_message += "\n\n" + self._playbook_store.format_for_prompt(similar)
+        except Exception:
+            pass  # graceful fallback
+
+        self.messages.append({"role": "user", "content": enriched_message})
         self._maybe_compress()
 
         full_text = ""
@@ -111,6 +141,12 @@ class DataAgent:
 
             self.messages.append({"role": "user", "content": tool_results})
             full_text = ""  # reset for next iteration's text
+
+        # --- Save successful query as a playbook ---
+        try:
+            self._save_playbook(user_message)
+        except Exception:
+            pass  # non-critical — don't break the response if playbook save fails
 
         return full_text
 
@@ -180,6 +216,36 @@ class DataAgent:
             return get_metadata_context(self.project_dir, tool_input["topic"])
         else:
             return f"Unknown tool: {name}"
+
+    # ------------------------------------------------------------------
+    # Playbook saving
+    # ------------------------------------------------------------------
+
+    def _save_playbook(self, question: str) -> None:
+        """Extract SQL queries from the conversation and save as a playbook."""
+        if not self._playbook_store:
+            return
+
+        sql_queries: list[str] = []
+        tables_used: set[str] = set()
+
+        for msg in self.messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and block.get("name") == "execute_sql":
+                    sql = block.get("input", {}).get("sql", "")
+                    if sql:
+                        sql_queries.append(sql)
+                        # Extract table references from SQL
+                        for match in re.findall(r"(?:FROM|JOIN)\s+([\w.]+)", sql, re.IGNORECASE):
+                            tables_used.add(match)
+
+        if sql_queries:
+            self._playbook_store.save(question, sql_queries, sorted(tables_used))
 
     # ------------------------------------------------------------------
     # Context compression
@@ -265,3 +331,56 @@ class DataAgent:
                             parts.append(f"{role} [tool result]: {result_text}")
 
         return "\n".join(parts)
+
+
+# ------------------------------------------------------------------
+# Module-level helpers
+# ------------------------------------------------------------------
+
+def _build_table_index(db_path: str) -> TableIndex | None:
+    """Build a semantic search index over all tables in the warehouse."""
+    import os
+
+    if not os.environ.get("VOYAGE_API_KEY"):
+        return None  # graceful fallback if no Voyage key
+
+    import duckdb
+
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        index = TableIndex()
+        tables = con.execute(
+            """
+            SELECT table_schema, table_name
+            FROM information_schema.tables
+            WHERE table_schema NOT IN ('information_schema', 'pg_catalog')
+            ORDER BY table_schema, table_name
+            """
+        ).fetchall()
+
+        for schema, table in tables:
+            cols = con.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = ? AND table_name = ?
+                ORDER BY ordinal_position
+                """,
+                [schema, table],
+            ).fetchall()
+            col_names = [c[0] for c in cols]
+
+            try:
+                row_count = con.execute(
+                    f'SELECT COUNT(*) FROM "{schema}"."{table}"'
+                ).fetchone()[0]
+            except Exception:
+                row_count = 0
+
+            index.add_table(schema, table, col_names, row_count)
+
+        index.build()
+        return index
+    except Exception:
+        return None  # graceful fallback
+    finally:
+        con.close()
