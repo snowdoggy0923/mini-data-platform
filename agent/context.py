@@ -19,13 +19,13 @@ def build_system_prompt(db_path: str, project_dir: str) -> str:
         # ---- Tier 1: marts tables (full detail) ----
         marts_tables = _get_tables(con, "marts")
         if marts_tables:
-            sections.append("## 重点表（marts 层 — 分析首选，数据已清洗）\n")
+            sections.append("## Key Tables (marts layer — preferred for analysis, cleaned data)\n")
             for tbl_name, row_count in marts_tables:
                 cols = _get_columns(con, "marts", tbl_name)
                 col_list = ", ".join(f"{c[0]} ({c[1]})" for c in cols)
                 sections.append(
                     f"### marts.{tbl_name} ({row_count:,} rows)\n"
-                    f"列: {col_list}\n"
+                    f"Columns: {col_list}\n"
                 )
 
             # Business rules inferred from dbt models
@@ -39,11 +39,11 @@ def build_system_prompt(db_path: str, project_dir: str) -> str:
             tables = _get_tables(con, schema)
             if tables:
                 table_list = ", ".join(f"{name} ({count:,})" for name, count in tables)
-                other_schemas.append(f"- **{schema}** 层: {table_list}")
+                other_schemas.append(f"- **{schema}** layer: {table_list}")
 
         if other_schemas:
             sections.append(
-                "## 其他可用表（需要时用 describe_table 工具探索详情）\n"
+                "## Other Available Tables (use describe_table tool to explore details)\n"
                 + "\n".join(other_schemas)
             )
 
@@ -103,7 +103,7 @@ def _get_columns(
 
 def _get_business_rules(project_dir: str) -> str:
     """Extract key business rules from dbt model SQL files."""
-    rules: list[str] = ["**业务规则（从 dbt 模型推断）:**"]
+    rules: list[str] = ["**Business Rules (inferred from dbt models):**"]
 
     dbt_dir = Path(project_dir) / "dbt_project" / "models"
     if not dbt_dir.exists():
@@ -115,8 +115,8 @@ def _get_business_rules(project_dir: str) -> str:
         content = fct_path.read_text()
         if "transaction_id" in content:
             rules.append(
-                "- `fct_orders`: 一个 transaction_id 可对应多行（多产品订单）。"
-                "聚合订单级指标时需按 transaction_id 去重。"
+                "- `fct_orders`: A single transaction_id can have multiple rows (multi-product orders). "
+                "Deduplicate by transaction_id when aggregating order-level metrics."
             )
         if "line_margin" in content:
             rules.append("- `fct_orders.line_margin` = total - (product_cost × quantity)")
@@ -129,7 +129,7 @@ def _get_business_rules(project_dir: str) -> str:
         for f in stg_dir.glob("*.sql"):
             content = f.read_text()
             if "abs(" in content.lower():
-                rules.append(f"- `{f.stem}`: 负数值已转为绝对值（数据清洗）")
+                rules.append(f"- `{f.stem}`: Negative values converted to absolute values (data cleaning)")
 
     return "\n".join(rules)
 
@@ -144,7 +144,7 @@ Answer questions by exploring the warehouse metadata and writing SQL queries.
 Always respond in the same language as the user's question."""
 
 _LINEAGE = """\
-## 数据血缘 (Data Lineage)
+## Data Lineage
 ```
 raw.* → staging.stg_* (dbt views, data cleaning) → marts.* (dbt tables, dimensional modeling)
 ```

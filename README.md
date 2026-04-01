@@ -71,6 +71,32 @@ uv run python -m agent ask "What's the year-over-year growth rate for each produ
 uv run python -m agent ask "Find customers who haven't ordered in the last 6 months but were previously active"
 ```
 
+### Evaluation
+
+Run the evaluation suite to measure agent accuracy against ground truth SQL:
+
+```bash
+uv run python eval.py
+```
+
+This runs 5 test cases (easy → hard), checks numeric accuracy against DuckDB ground truth, and uses Claude Haiku as an LLM judge to score correctness, completeness, and insight (1-5 each).
+
+### Architecture
+
+The agent is inspired by [Astronomer's Kepler architecture](https://www.astronomer.io/blog/building-kepler-astronomer-internal-data-assistant/) and uses a tiered metadata discovery approach:
+
+- **Tier 1 (marts)**: Full column names, types, and business rules injected into the system prompt — the agent can write SQL immediately without tool calls.
+- **Tier 2 (raw/staging)**: Only table names and row counts in the system prompt — the agent uses `describe_table` to explore details on demand.
+
+This keeps the prompt compact while giving the agent everything it needs for the most common analytical queries.
+
+**Key features:**
+
+- **Streaming tool-use loop**: Claude Sonnet with 4 tools (`execute_sql`, `list_tables`, `describe_table`, `get_metadata_context`). The agent iterates until it has enough information to answer.
+- **Semantic search for table discovery**: VoyageAI embeddings (`voyage-3.5-lite`) index all table metadata at startup. At query time, the most relevant tables are surfaced by cosine similarity and injected as hints. Requires `VOYAGE_API_KEY` in `.env` (optional — agent works without it).
+- **Playbooks**: Successful query patterns (question + SQL + tables used) are cached to `playbooks/playbooks.jsonl` with embeddings. On future similar questions, matched playbooks are injected into the prompt as reference patterns.
+- **Context compression**: When conversation history exceeds ~50K tokens, older messages are summarized by Claude Haiku and replaced with a compact summary, keeping the most recent 8 messages intact.
+
 ---
 
 ## Quick Setup
