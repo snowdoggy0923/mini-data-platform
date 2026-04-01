@@ -20,6 +20,59 @@ Then build a CLI agent where you can send questions like the ones above. We have
 
 To submit, share your repo with us. You should modify / create a new README that outlines your approach and where you'd continue building things if you had more time. This should take no more than a few hours.
 
+## CLI Agent
+
+A natural language agent that answers ad-hoc data questions by querying the DuckDB warehouse directly. Built with Claude (Anthropic API), streaming tool-use, and tiered metadata discovery inspired by [Astronomer's Kepler architecture](https://www.astronomer.io/blog/building-kepler-astronomer-internal-data-assistant/).
+
+### Setup
+
+```bash
+uv sync
+cp .env.example .env  # then add your ANTHROPIC_API_KEY
+```
+
+### Usage
+
+```bash
+# Single question
+uv run python -m agent ask "How much in sales did we do last quarter?"
+
+# Interactive chat
+uv run python -m agent chat
+
+# Point to a different database
+uv run python -m agent ask "List all tables" --db path/to/other.duckdb
+```
+
+### Test Questions
+
+```bash
+# Sales analysis
+uv run python -m agent ask "How much in sales did we do in Q4 2024?"
+uv run python -m agent ask "What are the monthly revenue trends for 2024?"
+uv run python -m agent ask "Which payment method generates the most revenue?"
+
+# Product analysis
+uv run python -m agent ask "Which two products are most frequently bought together?"
+uv run python -m agent ask "What are the top 10 products by revenue?"
+uv run python -m agent ask "Are there any anomalies with how we sell products?"
+
+# Customer analysis
+uv run python -m agent ask "What's our average customer lifetime value?"
+uv run python -m agent ask "How do customer segments compare in terms of spending?"
+uv run python -m agent ask "Which states have the most high-value customers?"
+
+# Campaign / marketing
+uv run python -m agent ask "Which campaign types have the best ROI?"
+uv run python -m agent ask "How much revenue is attributed to marketing campaigns?"
+
+# Complex / multi-step
+uv run python -m agent ask "What's the year-over-year growth rate for each product category?"
+uv run python -m agent ask "Find customers who haven't ordered in the last 6 months but were previously active"
+```
+
+---
+
 ## Quick Setup
 
 Run the setup script to initialize everything:

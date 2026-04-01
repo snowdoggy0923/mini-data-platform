@@ -8,4 +8,11 @@ dependencies = [
     "apache-airflow>=3.1.2",
     "dbt-duckdb>=1.10.0",
     "duckdb>=1.4.1",
+    "anthropic>=0.40.0",
+    "typer>=0.15.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
 ]
+
+[project.scripts]
+agent = "agent.cli:app"
